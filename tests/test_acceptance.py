@@ -14,6 +14,11 @@
 6. 报告导出
 7. 统计分析
 8. 业务规则校验（编号重复、项目缺失、复检关联、销毁检查、放行校验）
+9. 复检争议仲裁与批次风险分级
+10. 复检流程状态与数据关联校验（错样品、非原始报告、停用报告、未完成检测、重复确认）
+
+实际测试命令:
+    .venv/bin/python tests/test_acceptance.py
 """
 
 import sys
@@ -995,6 +1000,192 @@ run_test("9.17 整体统计包含风险等级", test_9_17_overall_stats_includes
 run_test("9.18 仲裁完成但判定不合格仍无法放行", test_9_18_release_after_arbitration_completed_fail)
 run_test("9.19 重启后仲裁/风险/报告/导出均持久化", test_9_19_restart_data_persistence)
 run_test("9.20 仲裁列表/详情/编号查询正常", test_9_20_arbitration_list_and_detail)
+
+
+print(f"\n{Colors.BLUE}[验收10] 复检流程状态与数据关联校验{Colors.RESET}")
+
+batch_id_10 = None
+sample_id_10 = None
+original_report_id_10 = None
+reinspection_id_10 = None
+re_sample_id_10 = None
+
+
+def test_10_1_wrong_sample_rejected():
+    reinspection_data = {
+        "original_sample_id": sample_id_1,
+        "original_report_id": original_report_id_2,
+        "reason": "错样品关联测试",
+        "applicant": "测试员",
+    }
+    response = client.post("/api/v1/reinspections", json=reinspection_data)
+    assert response.status_code == 400, "报告与样品不匹配应拒绝申请"
+    assert "不匹配" in response.json()["detail"]
+
+
+def test_10_2_non_original_report_rejected():
+    reports = client.get("/api/v1/reports", params={"batch_id": batch_id_2, "report_type": "final"}).json()
+    assert len(reports) == 1, "批次2应有最终报告"
+    reinspection_data = {
+        "original_sample_id": sample_id_2,
+        "original_report_id": reports[0]["id"],
+        "reason": "基于最终报告申请复检",
+        "applicant": "测试员",
+    }
+    response = client.post("/api/v1/reinspections", json=reinspection_data)
+    assert response.status_code == 400, "非原始报告应拒绝申请复检"
+    assert "只能基于原始报告" in response.json()["detail"]
+
+
+def test_10_3_inactive_report_reapply_rejected():
+    report = client.get(f"/api/v1/reports/{original_report_id_2}").json()
+    assert report["is_active"] == False, "前置条件：原始报告已被停用"
+    reinspection_data = {
+        "original_sample_id": sample_id_2,
+        "original_report_id": original_report_id_2,
+        "reason": "对已停用原始报告再次申请复检",
+        "applicant": "测试员",
+    }
+    response = client.post("/api/v1/reinspections", json=reinspection_data)
+    assert response.status_code == 400, "已停用原始报告应不能再次申请复检"
+    assert "已被停用" in response.json()["detail"]
+
+
+def test_10_4_wrong_re_sample_result_rejected():
+    result_data = {
+        "sample_id": sample_id_2,
+        "test_item_id": test_item_ids[0],
+        "test_value": "7.0",
+        "numeric_value": 7.0,
+        "tester": "测试员",
+    }
+    response = client.post(f"/api/v1/reinspections/{reinspection_id}/test-results", json=result_data)
+    assert response.status_code == 400, "检测样品与复检样品不匹配应拒绝录入"
+    assert "不匹配" in response.json()["detail"]
+
+
+def test_10_5_setup_reinspection_for_incomplete_testing():
+    global batch_id_10, sample_id_10, original_report_id_10, reinspection_id_10, re_sample_id_10
+    batch_data = {
+        "batch_no": "BATCH2024010",
+        "product_name": "复检状态校验产品",
+        "production_date": "2024-01-22T10:00:00",
+        "quantity": 300,
+        "production_line": "L1",
+    }
+    response = client.post("/api/v1/batches", json=batch_data)
+    assert response.status_code == 200
+    batch_id_10 = response.json()["id"]
+
+    response = client.post("/api/v1/samples", json={"batch_id": batch_id_10, "sampling_person": "质检员E"})
+    assert response.status_code == 200
+    sample_id_10 = response.json()["id"]
+
+    for item_id in test_item_ids:
+        response = client.post("/api/v1/tests/results", json={
+            "sample_id": sample_id_10, "test_item_id": item_id,
+            "test_value": "20.0", "numeric_value": 20.0, "tester": "检测员F",
+        })
+        assert response.status_code == 200
+
+    response = client.post(f"/api/v1/reports/original/{sample_id_10}?issued_by=审核员E")
+    assert response.status_code == 200
+    original_report_id_10 = response.json()["id"]
+    assert response.json()["overall_judgment"] == "fail"
+
+    reinspection_data = {
+        "original_sample_id": sample_id_10,
+        "original_report_id": original_report_id_10,
+        "reason": "校验未完成检测与重复确认",
+        "applicant": "质量工程师",
+    }
+    response = client.post("/api/v1/reinspections", json=reinspection_data)
+    assert response.status_code == 200, f"申请复检失败: {response.text}"
+    reinspection_id_10 = response.json()["id"]
+    re_sample_id_10 = response.json()["re_sample_id"]
+
+    response = client.post(f"/api/v1/reinspections/{reinspection_id_10}/test-results", json={
+        "sample_id": re_sample_id_10, "test_item_id": test_item_ids[0],
+        "test_value": "21.0", "numeric_value": 21.0, "tester": "检测员G",
+    })
+    assert response.status_code == 200
+
+
+def test_10_6_complete_testing_with_missing_items_rejected():
+    response = client.post(f"/api/v1/reinspections/{reinspection_id_10}/complete-testing")
+    assert response.status_code == 400, "检测项目未全部完成应不能进入完成状态"
+    assert "检测项目缺失" in response.json()["detail"]
+
+    reinspection = client.get(f"/api/v1/reinspections/{reinspection_id_10}").json()
+    assert reinspection["status"] == "testing", "状态应保持为 testing"
+
+
+def test_10_7_confirm_fail_batch_rejected_and_risk_recalculated():
+    for item_id in test_item_ids[1:]:
+        response = client.post(f"/api/v1/reinspections/{reinspection_id_10}/test-results", json={
+            "sample_id": re_sample_id_10, "test_item_id": item_id,
+            "test_value": "21.0", "numeric_value": 21.0, "tester": "检测员G",
+        })
+        assert response.status_code == 200
+
+    response = client.post(f"/api/v1/reinspections/{reinspection_id_10}/complete-testing")
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+    batch_before = client.get(f"/api/v1/batches/{batch_id_10}").json()
+
+    confirm_data = {
+        "difference_identified": False,
+        "difference_remark": "复检结果与原始结果一致，维持不合格",
+        "confirmed_by": "质量主管",
+        "final_judgment": "fail",
+    }
+    response = client.post(f"/api/v1/reinspections/{reinspection_id_10}/confirm-difference", json=confirm_data)
+    assert response.status_code == 200
+    assert response.json()["status"] == "confirmed"
+    assert response.json()["final_judgment"] == "fail"
+
+    batch_after = client.get(f"/api/v1/batches/{batch_id_10}").json()
+    assert batch_after["final_result"] == "fail", "批次最终结果应为不合格"
+    assert batch_after["status"] == "rejected", "批次应进入拒收状态"
+    assert batch_after["risk_level"] in ["low", "medium", "high"], "风险等级应重新计算"
+    assert batch_after["risk_score"] != batch_before["risk_score"] or batch_after["risk_score"] > 0, "风险评分应重新计算"
+
+
+def test_10_8_duplicate_confirm_rejected():
+    confirm_data = {
+        "difference_identified": False,
+        "confirmed_by": "质量主管",
+        "final_judgment": "fail",
+    }
+    response = client.post(f"/api/v1/reinspections/{reinspection_id_10}/confirm-difference", json=confirm_data)
+    assert response.status_code == 400, "已确认的复检不允许重复确认"
+    assert "状态无效" in response.json()["detail"]
+
+    batch = client.get(f"/api/v1/batches/{batch_id_10}").json()
+    assert batch["final_result"] == "fail", "重复确认不应改变批次最终判定"
+    assert batch["status"] == "rejected", "重复确认不应改变批次状态"
+
+
+def test_10_9_invalid_final_judgment_rejected():
+    confirm_data = {
+        "difference_identified": False,
+        "confirmed_by": "质量主管",
+        "final_judgment": "pending",
+    }
+    response = client.post(f"/api/v1/reinspections/{reinspection_id_10}/confirm-difference", json=confirm_data)
+    assert response.status_code == 422, "最终判定仅允许 pass/fail"
+
+
+run_test("10.1 错样品申请复检被拒绝", test_10_1_wrong_sample_rejected)
+run_test("10.2 非原始报告申请复检被拒绝", test_10_2_non_original_report_rejected)
+run_test("10.3 已停用原始报告不能再次申请复检", test_10_3_inactive_report_reapply_rejected)
+run_test("10.4 复检录入结果样品不匹配被拒绝", test_10_4_wrong_re_sample_result_rejected)
+run_test("10.5 准备复检(仅录入1/3检测项)", test_10_5_setup_reinspection_for_incomplete_testing)
+run_test("10.6 检测项目未完成不能进入完成状态", test_10_6_complete_testing_with_missing_items_rejected)
+run_test("10.7 差异确认后批次拒收并重算风险等级", test_10_7_confirm_fail_batch_rejected_and_risk_recalculated)
+run_test("10.8 重复确认被拒绝且不影响批次状态", test_10_8_duplicate_confirm_rejected)
+run_test("10.9 非法最终判定值被拒绝", test_10_9_invalid_final_judgment_rejected)
 
 
 if failed > 0:
