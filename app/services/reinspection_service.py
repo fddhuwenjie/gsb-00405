@@ -16,6 +16,7 @@ from ..schemas import (
     BatchStatus,
 )
 from ..exceptions import (
+    QualityInspectionException,
     SampleNotFoundError,
     ReportNotFoundError,
     ReInspectionNotFoundError,
@@ -50,6 +51,9 @@ class ReInspectionService(BaseService):
 
         if original_report.report_type != "original":
             raise ReInspectionLinkError("只能基于原始报告申请复检")
+
+        if not original_report.is_active:
+            raise ReInspectionLinkError("原始报告已停用，不能再次申请复检")
 
         if original_sample.is_destroyed:
             raise RetentionDestroyedError(original_sample.sample_code)
@@ -149,6 +153,16 @@ class ReInspectionService(BaseService):
         self, reinspection_id: int, status: str
     ) -> ReInspection:
         reinspection = self.get_reinspection(reinspection_id)
+
+        allowed_transitions = {
+            ReInspectionStatus.PENDING.value: {ReInspectionStatus.TESTING.value},
+        }
+        if status not in allowed_transitions.get(reinspection.status, set()):
+            raise InvalidStatusError(
+                reinspection.status,
+                f"{ReInspectionStatus.PENDING.value}->{ReInspectionStatus.TESTING.value}",
+            )
+
         reinspection.status = status
         reinspection.updated_at = datetime.now()
         self.db.commit()
@@ -178,7 +192,15 @@ class ReInspectionService(BaseService):
         reinspection = self.get_reinspection(reinspection_id)
 
         if reinspection.status != ReInspectionStatus.COMPLETED.value:
-            raise InvalidStatusError(reinspection.status, "completed")
+            raise InvalidStatusError(reinspection.status, ReInspectionStatus.COMPLETED.value)
+
+        if data.final_judgment not in (
+            Judgment.PASS.value,
+            Judgment.FAIL.value,
+        ):
+            raise QualityInspectionException(
+                f"最终判定无效: {data.final_judgment}，必须为 {Judgment.PASS.value}(合格) 或 {Judgment.FAIL.value}(不合格)"
+            )
 
         reinspection.difference_identified = data.difference_identified
         reinspection.difference_confirmed_by = data.confirmed_by

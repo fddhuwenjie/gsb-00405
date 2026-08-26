@@ -89,6 +89,8 @@ class TestService(BaseService):
             .filter(
                 TestResult.sample_id == sample_id,
                 TestResult.reinspection_id == reinspection_id,
+                TestResult.result_status == "completed",
+                TestResult.judgment.in_([Judgment.PASS.value, Judgment.FAIL.value]),
             )
             .all()
         )
