@@ -366,6 +366,14 @@ class DifferenceConfirm(BaseModel):
     confirmed_by: str = Field(..., max_length=100, description="确认人")
     final_judgment: str = Field(..., max_length=20, description="最终判定")
 
+    @field_validator("final_judgment", mode="before")
+    @classmethod
+    def _fj(cls, v):
+        v = _normalize_conclusion(v)
+        if v not in (Judgment.PASS.value, Judgment.FAIL.value):
+            raise ValueError("最终判定只能为 pass 或 fail")
+        return v
+
 
 class ReportResponse(BaseModel):
     id: int
