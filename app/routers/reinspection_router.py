@@ -62,21 +62,8 @@ def create_reinspection_result(
     db: Session = Depends(get_db),
 ):
     reinspection_service = ReInspectionService(db)
-    reinspection = reinspection_service.get_reinspection(reinspection_id)
-
-    if data.sample_id != reinspection.re_sample_id:
-        from ..exceptions import ReInspectionLinkError
-        raise ReInspectionLinkError("检测样品与复检样品不匹配")
-
-    if reinspection.status == "pending":
-        reinspection_service.update_reinspection_status(reinspection_id, "testing")
-
+    result = reinspection_service.add_reinspection_test_result(reinspection_id, data)
     test_service = TestService(db)
-    result = test_service.create_test_result(
-        data,
-        is_reinspection=True,
-        reinspection_id=reinspection_id,
-    )
     return test_service.to_response(result)
 
 
