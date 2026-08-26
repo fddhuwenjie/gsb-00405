@@ -51,6 +51,9 @@ class ReInspectionService(BaseService):
         if original_report.report_type != "original":
             raise ReInspectionLinkError("只能基于原始报告申请复检")
 
+        if not original_report.is_active:
+            raise ReInspectionLinkError("原始报告已停用，无法再次申请复检")
+
         if original_sample.is_destroyed:
             raise RetentionDestroyedError(original_sample.sample_code)
 
