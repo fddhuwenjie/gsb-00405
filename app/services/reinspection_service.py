@@ -22,6 +22,7 @@ from ..exceptions import (
     ReInspectionLinkError,
     RetentionDestroyedError,
     InvalidStatusError,
+    TestItemMissingError,
 )
 
 
@@ -50,6 +51,24 @@ class ReInspectionService(BaseService):
 
         if original_report.report_type != "original":
             raise ReInspectionLinkError("只能基于原始报告申请复检")
+
+        if not original_report.is_active:
+            raise ReInspectionLinkError("原始报告已停用，不能再次申请复检")
+
+        existing_reinspection = (
+            self.db.query(ReInspection)
+            .filter(
+                ReInspection.original_report_id == data.original_report_id,
+                ReInspection.status.in_([
+                    ReInspectionStatus.PENDING.value,
+                    ReInspectionStatus.TESTING.value,
+                    ReInspectionStatus.COMPLETED.value,
+                ]),
+            )
+            .first()
+        )
+        if existing_reinspection:
+            raise ReInspectionLinkError("该原始报告已存在复检记录，不能重复申请")
 
         if original_sample.is_destroyed:
             raise RetentionDestroyedError(original_sample.sample_code)
@@ -165,6 +184,18 @@ class ReInspectionService(BaseService):
             reinspection.re_sample_id, reinspection_id
         )
 
+        pending_results = (
+            self.db.query(TestResult)
+            .filter(
+                TestResult.sample_id == reinspection.re_sample_id,
+                TestResult.reinspection_id == reinspection_id,
+                (TestResult.result_status != "completed") | (TestResult.judgment.is_(None)),
+            )
+            .count()
+        )
+        if pending_results > 0:
+            raise TestItemMissingError(["存在未完成或未判定的复检检测项"])
+
         reinspection.status = ReInspectionStatus.COMPLETED.value
         reinspection.updated_at = datetime.now()
 
@@ -177,8 +208,16 @@ class ReInspectionService(BaseService):
     ) -> ReInspection:
         reinspection = self.get_reinspection(reinspection_id)
 
+        if reinspection.status == ReInspectionStatus.CONFIRMED.value:
+            raise InvalidStatusError(reinspection.status, "completed")
+
         if reinspection.status != ReInspectionStatus.COMPLETED.value:
             raise InvalidStatusError(reinspection.status, "completed")
+
+        if data.final_judgment not in (Judgment.PASS.value, Judgment.FAIL.value):
+            raise ReInspectionLinkError(
+                f"最终判定必须为 '{Judgment.PASS.value}' 或 '{Judgment.FAIL.value}'"
+            )
 
         reinspection.difference_identified = data.difference_identified
         reinspection.difference_confirmed_by = data.confirmed_by
@@ -198,12 +237,36 @@ class ReInspectionService(BaseService):
 
         self.db.commit()
         self.db.refresh(reinspection)
+        self.db.refresh(batch)
 
         from .batch_service import BatchService
         batch_service = BatchService(self.db)
         batch_service.calculate_risk_level(batch.id)
 
         return reinspection
+
+    def add_reinspection_test_result(self, reinspection_id: int, data) -> TestResult:
+        reinspection = self.get_reinspection(reinspection_id)
+
+        if data.sample_id != reinspection.re_sample_id:
+            raise ReInspectionLinkError("检测样品与复检样品不匹配")
+
+        if reinspection.status in (
+            ReInspectionStatus.COMPLETED.value,
+            ReInspectionStatus.CONFIRMED.value,
+        ):
+            raise InvalidStatusError(reinspection.status, "pending/testing")
+
+        if reinspection.status == ReInspectionStatus.PENDING.value:
+            reinspection.status = ReInspectionStatus.TESTING.value
+            reinspection.updated_at = datetime.now()
+            self.db.commit()
+
+        return self.test_service.create_test_result(
+            data,
+            is_reinspection=True,
+            reinspection_id=reinspection_id,
+        )
 
     def to_response(self, reinspection: ReInspection) -> ReInspectionResponse:
         return ReInspectionResponse(
